@@ -8,12 +8,12 @@ Smoke becomes part of an app's understanding of its surroundings: virtual object
 
 ## What developers can build
 
-- **AR compositing:** add haze-aware occlusion to RealityKit apps so virtual objects fade according to the estimated smoke between the viewer and the object.
-- **Volumetric lighting in AR:** render virtual lights, beams, and shadows through captured smoke using a renderer attachment with controls for lighting and appearance.
-- **Smoke-aware AR physics:** query optical density and configurable drag or buoyancy responses at a point, allowing virtual objects to drift and react inside real plumes.
-- **Cross-device AR:** capture smoke on an iPhone and stream its estimated volume to Vision Pro through `MurkSync`, keeping virtual content aligned with the same physical space.
+- AR compositing: add haze-aware occlusion to RealityKit apps so virtual objects fade according to the estimated smoke between the viewer and the object.
+- Volumetric lighting in AR: render virtual lights, beams, and shadows through captured smoke using a renderer attachment with controls for lighting and appearance.
+- Smoke-aware AR physics: query optical density and configurable drag or buoyancy responses at a point, allowing virtual objects to drift and react inside real plumes.
+- Cross-device AR: capture smoke on an iPhone and stream its estimated volume to Vision Pro through `MurkSync`, keeping virtual content aligned with the same physical space.
 
-Capture, rendering, interaction, and sharing are reusable capabilities that developers incorporate into their own apps.
+Capture, rendering, interaction, and sharing are reusable capabilities
 
 ## How it works
 
