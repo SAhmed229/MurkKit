@@ -129,6 +129,5 @@ A single view constrains attenuation along rays, so a 3D smoke field is inferred
 
 Optical density alone does not measure mass density, airflow, drag, or buoyancy. `MurkInteract` uses configurable simulation parameters, and optionally a separately estimated flow field, to produce virtual responses. Lighting and disturbances are rendered effects; they do not physically illuminate or move real smoke. Compositing accounts for haze already present in the camera image to avoid applying it twice.
 
-## License
-
-[MIT](LICENSE).
+##Use
+mit license
