@@ -6,6 +6,49 @@ MurkKit is a Swift framework for bringing real smoke, fog, and haze into Apple-n
 
 Smoke becomes part of an app's understanding of its surroundings: virtual objects fade into real haze, virtual lights illuminate a representation of the medium, and interactive content responds to passing plumes. An iPhone provides the capture while Apple Vision Pro presents the experience through `MurkSync`.
 
+## Add haze occlusion to a RealityKit app
+
+Add this repository in Xcode's **Package Dependencies** and select the `MurkKit` product. Haze capture requires iOS/iPadOS 18 or later, a LiDAR-equipped device, and a camera usage description (`NSCameraUsageDescription`) in the host app.
+
+Use an existing `ARView` in AR mode with automatic session configuration disabled. Enable scene depth on its world-tracking configuration before running it:
+
+```swift
+import ARKit
+import MurkKit
+import RealityKit
+
+let configuration = ARWorldTrackingConfiguration()
+guard ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) else {
+    return // Show your app's unsupported-device message.
+}
+configuration.frameSemantics.insert(.sceneDepth)
+arView.automaticallyConfigureSession = false
+arView.session.run(configuration)
+```
+
+Once the view is onscreen and tracking normally, call from the main actor:
+
+```swift
+let haze = MurkHaze.attach(to: arView)
+try await haze.captureClearAirReference()
+haze.track(virtualObject)
+```
+
+Retain `haze` in your view controller or app model. Use one controller per AR view. Capture can throw if the camera or reference is unsuitable; show the error and let the user retry.
+
+For the reference, keep the phone stationary and center a matte card with **black on the left and white on the right** in clear air. The sampled squares occupy 34–46% and 54–66% of the view's width, both at 44–56% of its height. Keep both squares entirely inside their respective card halves, under steady lighting. Let the camera focus before capture; MurkKit locks exposure, white balance, and focus until cleanup.
+
+Place a small virtual object just in front of the card, with its origin projecting into that central strip. Introduce light haze between the camera and card. MurkKit scales the entity's original opacity using contrast loss and its depth relative to the card. It restores normal opacity when the observation is unreliable, the camera moves, or the object's origin leaves the measured region. The estimate assumes approximately uniform haze along that short path; a single card cannot locate an arbitrary plume in depth.
+
+```swift
+haze.untrack(virtualObject) // Restore this entity's original opacity.
+haze.detach()             // Restore all entities and release camera settings.
+```
+
+MurkKit leaves the session delegate and configuration under your app's control. While an entity is tracked, MurkKit owns its `OpacityComponent`; avoid changing it independently. Track either a parent or its children: overlapping registrations return `false` to avoid fading the same hierarchy twice.
+
+Implementation notes and verification are recorded in [INCREMENTS.md](INCREMENTS.md).
+
 ## What developers can build
 
 - AR compositing: add haze-aware occlusion to RealityKit apps so virtual objects fade according to the estimated smoke between the viewer and the object.
