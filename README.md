@@ -27,11 +27,11 @@ flowchart LR
     F --> G["Vision Pro<br/>Rendering + interaction"]
 ```
 
-1. **Capture the scene.** Acquire RGB, available depth/confidence, camera calibration, and poses from a supported device. A clear-air reference distinguishes the scene's appearance from the medium in front of it.
-2. **Estimate the medium.** Infer optical attenuation from image changes and use reliable depth to locate background surfaces. Track confidence and observation age as smoke moves or capture conditions change.
-3. **Build a spatial representation.** Fuse observations into an approximate field of optical density. Preserve which regions are observed, inferred, or unknown so apps can choose how to display them.
-4. **Render and interact.** Integrate attenuation along viewing rays for compositing, raymarch the field for lighting effects, and expose spatial samples to the app's interaction model.
-5. **Share the experience.** Send timestamped fields and their coordinate transforms to another device for rendering and interaction from its own viewpoint.
+1. Capture the scene. Acquire RGB, available depth/confidence, camera calibration, and poses from a supported device. A clear-air reference distinguishes the scene's appearance from the medium in front of it.
+2. Estimate the medium. Infer optical attenuation from image changes and use reliable depth to locate background surfaces. Track confidence and observation age as smoke moves or capture conditions change.
+3. Build a spatial representation. Fuse observations into an approximate field of optical density. Preserve which regions are observed, inferred, or unknown so apps can choose how to display them.
+4. Render and interact. Integrate attenuation along viewing rays for compositing, raymarch the field for lighting effects, and expose spatial samples to the app's interaction model.
+5. Share the experience. Send timestamped fields and their coordinate transforms to another device for rendering and interaction from its own viewpoint.
 
 Live capture and recorded sessions feed the same pipeline, allowing developers to build and debug an effect against a repeatable recording.
 
