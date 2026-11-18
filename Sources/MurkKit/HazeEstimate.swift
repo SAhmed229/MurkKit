@@ -1,51 +1,33 @@
 import Foundation
 
-/// Linear-light samples from two adjacent patches on the same reference surface.
-struct ContrastSample: Sendable {
-    let darkLuminance: Double
-    let lightLuminance: Double
-    let axialDepth: Double
-}
-
-/// A contrast-based estimate for approximately uniform haze in front of a reference.
-struct HazeEstimate: Sendable {
-    private let referenceDepth: Double
-    private let referenceTransmittance: Double
-
-    init?(reference: ContrastSample, current: ContrastSample) {
-        let luminances = [
-            reference.darkLuminance, reference.lightLuminance,
-            current.darkLuminance, current.lightLuminance
-        ]
-        guard luminances.allSatisfy({ $0.isFinite && (0...1).contains($0) }),
-              reference.lightLuminance < 0.98,
-              current.lightLuminance < 0.98,
-              reference.axialDepth.isFinite, reference.axialDepth > 0,
-              current.axialDepth.isFinite, current.axialDepth > 0,
-              abs(current.axialDepth - reference.axialDepth)
-                <= max(0.05, reference.axialDepth * 0.05) else {
-            return nil
-        }
-
-        let referenceContrast = reference.lightLuminance - reference.darkLuminance
-        let currentContrast = current.lightLuminance - current.darkLuminance
-        guard referenceContrast >= 0.05, currentContrast >= 0 else {
-            return nil
-        }
-
-        let ratio = currentContrast / referenceContrast
-        guard ratio <= 1.1 else { return nil }
-
-        referenceDepth = reference.axialDepth
-        referenceTransmittance = min(ratio, 1)
+/// A room-wide estimate under the assumption of steady, approximately uniform haze.
+public struct HazeEstimate: Sendable, Equatable {
+    public enum Confidence: Sendable, Equatable {
+        /// More observations at different distances are needed.
+        case insufficient
+        /// Some evidence exists, but it is too limited or inconsistent to apply.
+        case low
+        /// Several independently tracked patches agree within the model's tolerances.
+        case usable
     }
 
-    /// Queries only the measured depth interval, without extrapolating behind the card.
-    func transmittance(atAxialDepth depth: Double) -> Double? {
-        guard depth.isFinite, depth >= 0, depth <= referenceDepth else {
-            return nil
-        }
-        guard depth > 0 else { return 1 }
-        return pow(referenceTransmittance, depth / referenceDepth)
+    /// Estimated visible-band optical extinction in inverse metres, when usable.
+    public let extinctionCoefficient: Double?
+    public let confidence: Confidence
+    /// Fresh patches with enough distance variation to attempt a fit.
+    public let patchCount: Int
+    /// Distance supported by every patch contributing to a usable estimate, in metres.
+    public let maximumDistance: Double
+
+    static let unavailable = HazeEstimate(
+        extinctionCoefficient: nil, confidence: .insufficient, patchCount: 0, maximumDistance: 0
+    )
+
+    /// Returns nil for uncertain estimates or distances outside observed coverage.
+    public func transmittance(at distance: Double) -> Double? {
+        guard confidence == .usable, let coefficient = extinctionCoefficient,
+              coefficient.isFinite, coefficient >= 0,
+              distance.isFinite, distance >= 0, distance <= maximumDistance else { return nil }
+        return exp(-coefficient * distance)
     }
 }

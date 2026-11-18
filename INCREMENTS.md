@@ -1,61 +1,69 @@
 # Implementation increments
 
-## 001 — Reference-card haze occlusion
+## 002 — Live room scanning
 
 **Date:** 2026-11-18
 
-**Outcome:** a dependency-free Swift package with a small RealityKit integration for one fade value per entity, measured against a stationary black-and-white reference card.
+**Outcome:** estimate approximately uniform haze while moving through a room that is already hazy. The app uses natural surface textures at several distances, without a physical card or clear-air scan.
 
 ```swift
 let haze = MurkHaze.attach(to: arView)
-try await haze.captureClearAirReference()
+try haze.startScanning()
 haze.track(virtualObject)
+
+let estimate = haze.estimate
+let transmission = estimate.transmittance(at: 2.0)
 ```
 
-The app retains the controller and calls `detach()` when leaving the experience. `untrack(_:)` restores one entity. The existing AR view must run world tracking with `.sceneDepth`; the controller does not replace its delegate or restart its session.
+Retain the controller, run the host AR session with `.sceneDepth`, and start after the view is tracking normally. `reset()` clears the measurements when entering a new area; `untrack(_:)` and `detach()` restore original entity opacity. The controller leaves the session delegate and configuration alone.
 
 ### Scope
 
-- One `MurkKit` library target, three source files, and no third-party dependencies.
-- iOS/iPadOS 18+ for RealityKit's `OpacityComponent`.
-- Two small, fixed camera patches, sampled in linear RGB with a reused Core Image context.
-- High-confidence LiDAR depth on both card halves, with matching surface depths.
-- Exposure, white balance, and focus locked for the reference and observation, with the prior modes restored on cleanup when still owned by MurkKit.
-- Contrast-ratio transmission, scaled to the object's axial depth and multiplied by its saved opacity.
-- Updates at approximately 10 Hz, with no full-frame CPU image copies.
-- Normal-opacity fallback for stale frames, poor tracking/depth, changed camera settings, camera movement, saturation, invalid contrast, or objects outside the reference region/depth.
-- Idempotent tracking, hierarchy overlap protection, and restoration on untrack, detach, failed recapture, or controller release.
+- One Swift package with no third-party dependencies, cloud requests, or trained model.
+- A bounded set of world-anchored, approximately planar texture patches, reprojected and sampled over the same physical footprint as the phone moves.
+- Linear-light contrast observations with depth, correspondence, viewing-angle, camera-setting, and focus checks.
+- Exposure and white balance held steady; autofocus remains under the host's control.
+- Separate contrast-distance fits for patches with unknown starting contrasts, followed by agreement and freshness checks.
+- One effective extinction coefficient and confidence level for the observed area. Only usable estimates affect RealityKit opacity.
+- Freshness expiry, bounded observation history, finite distance queries, and normal-opacity fallback.
+- No fixed-camera tolerance, physical target, clear-air capture method, or card-based estimator remains.
 
-This increment deliberately excludes 3D smoke reconstruction, per-pixel compositing, volumetric lighting, fluid simulation, Vision Pro streaming, sensor benchmarks, and extra module scaffolding.
+This increment does not add voxel reconstruction, individual plume localization, fluid simulation, volumetric lighting, Vision Pro sync, or a new dependency/module framework.
 
-### Measurement
+### Measurement and confidence
 
 ```text
-T_card   = (light_now − dark_now) / (light_clear − dark_clear)
-T_object = T_card ^ (object_axial_depth / card_axial_depth)
-opacity  = original_opacity × T_object
+ln(contrast_patch) = unknown_patch_intercept − extinction × distance
+transmission(distance) = exp(−extinction × distance)
+entity_opacity = original_opacity × transmission
 ```
 
-For example, 64% transmission to a card at 4 m gives 80% transmission to an object at 2 m under the uniform-medium assumption. Queries beyond the card are rejected. ARKit scene depth is axial distance from the camera plane; the object's depth uses the same convention.
+Distance is Euclidean camera-to-surface distance. Measurements must revisit the same physical texture across enough distance; merely collecting many frames from one position is insufficient. At least three fresh, agreeing patches are needed before an estimate becomes usable. Histories expire rather than preserving an old room value indefinitely.
 
-This is a controlled, fixed-view experiment. Keep the card and lighting stable. A single background observation cannot distinguish smoke in front of an object from smoke behind it; put the demo object close to the card. Camera processing can still affect contrast even with exposure locked, so the estimate is not calibrated volumetric reconstruction.
+`.insufficient` means more useful observations are needed. `.low` means the available fits are unsuitable or inconsistent. `.usable` means the internal model checks pass; it is not a calibrated accuracy guarantee. Queries outside the supported distance limit or without usable confidence return `nil`.
+
+The model assumes roughly homogeneous, steady haze, stable lighting, and matte surfaces. Shadows, reflections, motion blur, changing camera processing, or changing smoke can still resemble contrast loss. The estimate is not a 3D haze-density map. The near/far principle is supported by [Du et al.](https://amt.copernicus.org/articles/6/2121/2013/); this indoor iPhone implementation requires its own device validation.
 
 ### Verification
 
-- **Passed:** eight host tests for the numerical example, invalid/low-contrast/saturated inputs, depth mismatch, clear-air noise, and bounded depth queries.
-- **Passed:** complete Swift package build for the arm64 iOS Simulator SDK, targeting iOS 18, with warnings treated as errors.
-- **Passed:** iOS typechecking of all test sources, including three RealityKit tracking/cleanup tests, with warnings treated as errors. Those three tests were not executed because this environment has no usable iOS Simulator runtime.
-- **Device verification:** not performed. A real-device smoke experiment is required to validate camera-to-opacity behavior; automated arithmetic tests cannot establish capture accuracy.
+- **Passed:** 12 portable tests, including recovery with unknown texture contrasts and no clear-air sample, gradual 5 Hz walking, stationary-view retention, inconsistent paths, stale data, invalid inputs, bounded storage, and transmission query limits.
+- **Passed:** complete package build for the arm64 iOS Simulator SDK with an iOS 18 deployment target and warnings treated as errors.
+- **Passed:** iOS typechecking of all test sources, including four RealityKit lifecycle tests, with warnings treated as errors. Runtime execution of those four tests remains unavailable because no usable iOS Simulator runtime is installed here.
+- **Passed:** a synthetic Core Image check of the patch-sampling function across four rotations and a 2× footprint size change recovered imposed transmission 0.8 as approximately 0.803, with texture correlation approximately 0.99995.
+- **Device verification:** not performed. Physical-room optical accuracy, autofocus availability, power use, and live capture performance require a LiDAR-equipped iPhone/iPad.
 
-Run the portable tests with `swift test`. If a restricted environment prevents SwiftPM's nested manifest sandbox from starting, use `swift test --disable-sandbox`. Run the iOS tests from Xcode's `MurkKit` package scheme on an available iOS simulator or device.
+Run portable estimator tests with `swift test` (`--disable-sandbox` if the environment cannot run SwiftPM's nested sandbox). The RealityKit lifecycle tests require an iOS simulator or device. A real-device walk-through is necessary to evaluate optical accuracy and performance.
 
 ### Device acceptance check
 
-1. Run an AR view with scene depth on a LiDAR-equipped iPhone/iPad. Keep it fixed and let tracking settle.
-2. Fill the two sampling regions described in the README with the matte card's black and white halves. Capture the clear-air reference.
-3. Track a small entity just in front of the card; verify its clear-air opacity is preserved.
-4. Introduce light, approximately uniform haze. Verify fading follows contrast loss and does not accumulate with each frame.
-5. Move the phone or obscure the card with a nearer object; verify an unreliable observation restores the original opacity. Recapture after changing the setup.
-6. Untrack/detach and verify entity opacity and the camera's previous exposure, white-balance, and focus modes are restored.
+1. Start in an already hazy room with steady lighting and visible, textured matte surfaces. No clean-room scan is needed.
+2. Run the host AR session with scene depth, attach MurkKit, start scanning, and track a small virtual entity.
+3. Walk slowly toward and away from the same textures, changing distance by at least about 0.6 m while keeping them in view. Confirm that confidence stays insufficient while there is too little travel or too few usable patches.
+4. Once several patches agree, inspect the coefficient and transmission and confirm that the virtual entity fades according to its distance without repeated opacity multiplication.
+5. Turn toward a featureless surface, interrupt tracking, or let observations become stale. Confirm opacity returns to the original value rather than holding a previous fade.
+6. Repeat in clear air and under deliberately changed lighting to characterize false haze estimates; do not treat agreement alone as proof of physical accuracy.
+7. Call `reset()` in a new area, then `detach()` on exit. Confirm histories clear, opacity restores, and prior exposure/white-balance modes return.
 
-The next decision comes from this device check: improve the reference-card capture only where observed failures justify it before adding a broader feature.
+## 001 — Initial opacity integration (superseded)
+
+Introduced the Swift package, per-entity opacity handling, and cleanup behavior. Its physical-card capture and clear-air-reference API were removed in Increment 002. The original implementation remains available in Git history at `694e337`.

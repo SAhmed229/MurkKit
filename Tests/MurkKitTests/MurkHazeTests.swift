@@ -5,6 +5,25 @@ import XCTest
 
 final class MurkHazeTests: XCTestCase {
     @MainActor
+    func testRoomScanStartsWithoutAnEstimateAndResetRestoresOpacity() {
+        let view = ARView(frame: .zero, cameraMode: .nonAR, automaticallyConfigureSession: false)
+        let haze = MurkHaze.attach(to: view)
+        defer { haze.detach() }
+        XCTAssertFalse(haze.isScanning)
+        XCTAssertEqual(haze.estimate.confidence, .insufficient)
+        XCTAssertNil(haze.estimate.extinctionCoefficient)
+        let entity = Entity()
+        entity.components.set(OpacityComponent(opacity: 0.7))
+        haze.track(entity)
+        entity.components.set(OpacityComponent(opacity: 0.2))
+
+        haze.reset()
+
+        XCTAssertEqual(entity.components[OpacityComponent.self]?.opacity, 0.7)
+        XCTAssertNil(haze.estimate.transmittance(at: 2))
+    }
+
+    @MainActor
     func testTrackingIsIdempotentAndRejectsOverlappingHierarchies() {
         let view = ARView(frame: .zero, cameraMode: .nonAR, automaticallyConfigureSession: false)
         let haze = MurkHaze.attach(to: view)
@@ -52,6 +71,12 @@ final class MurkHazeTests: XCTestCase {
 
         XCTAssertNil(entity.components[OpacityComponent.self])
         XCTAssertFalse(haze.track(entity))
+        XCTAssertFalse(haze.isScanning)
+        XCTAssertThrowsError(try haze.startScanning()) { error in
+            guard case MurkHaze.ScanError.detached = error else {
+                return XCTFail("Expected a detached controller error")
+            }
+        }
         haze.detach() // Repeated cleanup is harmless.
     }
 }

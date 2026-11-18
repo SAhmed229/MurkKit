@@ -30,15 +30,28 @@ Once the view is onscreen and tracking normally, call from the main actor:
 
 ```swift
 let haze = MurkHaze.attach(to: arView)
-try await haze.captureClearAirReference()
+try haze.startScanning()
 haze.track(virtualObject)
 ```
 
-Retain `haze` in your view controller or app model. Use one controller per AR view. Capture can throw if the camera or reference is unsuitable; show the error and let the user retry.
+Retain `haze` in your view controller or app model and use one controller per AR view. Start with the room already hazy: there is no physical target to place and no clear-air pass to capture. Starting can throw if scene depth or camera control is unavailable.
 
-For the reference, keep the phone stationary and center a matte card with **black on the left and white on the right** in clear air. The sampled squares occupy 34–46% and 54–66% of the view's width, both at 44–56% of its height. Keep both squares entirely inside their respective card halves, under steady lighting. Let the camera focus before capture; MurkKit locks exposure, white balance, and focus until cleanup.
+Walk slowly toward and away from textured, matte surfaces such as posters, patterned walls, or bookshelves. Keep the same details in view while changing their distance by at least about 0.6 m. MurkKit follows small surface patches in world coordinates and compares the contrast of the same physical details from different distances. Sideways movement alone or pointing at a blank wall may not provide enough evidence.
 
-Place a small virtual object just in front of the card, with its origin projecting into that central strip. Introduce light haze between the camera and card. MurkKit scales the entity's original opacity using contrast loss and its depth relative to the card. It restores normal opacity when the observation is unreliable, the camera moves, or the object's origin leaves the measured region. The estimate assumes approximately uniform haze along that short path; a single card cannot locate an arbitrary plume in depth.
+The result is one live estimate of approximately uniform haze in the observed area. At least three patches must agree before MurkKit fades tracked entities. It holds exposure and white balance steady while scanning, leaves focus under the host app's control, and rejects unsuitable observations. Keep lighting and the haze reasonably steady.
+
+```swift
+let estimate = haze.estimate
+let transmission = estimate.transmittance(at: 2.0) // Optional transmission over 2 meters.
+```
+
+`estimate.confidence` is `.insufficient` while collecting useful views, `.low` when evidence is unsuitable or inconsistent, and `.usable` when enough patches agree. `extinctionCoefficient` is an optional estimate in inverse meters. Confidence describes internal agreement, not calibrated measurement accuracy. Transmission queries return `nil` unless usable and within the observed distance limit (`maximumDistance`).
+
+Entities use their original opacity until the estimate is usable and return to it when observations become unreliable. Fading uses the camera-to-entity distance and the uniform-haze model. This is a room-level optical estimate; it does not locate individual smoke plumes in 3D.
+
+```swift
+haze.reset() // Start collecting fresh evidence after entering a new room or changing lighting.
+```
 
 ```swift
 haze.untrack(virtualObject) // Restore this entity's original opacity.
@@ -58,25 +71,24 @@ Implementation notes and verification are recorded in [INCREMENTS.md](INCREMENTS
 
 Capture, rendering, interaction, and sharing are reusable capabilities
 
-## How it works
+## How room scanning works
 
 ```mermaid
 flowchart LR
-    A["iPhone / iPad<br/>RGB + depth + pose"] --> B["MurkCapture"]
-    B --> C["MurkEstimate + MurkFusion<br/>Estimated smoke field"]
-    C --> D["MurkRender<br/>Compositing + lighting"]
-    C --> E["MurkInteract<br/>Spatial queries + responses"]
-    C --> F["MurkSync"]
-    F --> G["Vision Pro<br/>Rendering + interaction"]
+    A["iPhone / iPad<br/>RGB + depth + pose"] --> B["Natural surface patches<br/>Matched across distances"]
+    B --> C["Contrast-distance fits<br/>Agreement + freshness checks"]
+    C --> D["Live haze estimate<br/>Extinction + confidence"]
+    D --> E["RealityKit entity opacity"]
+    D --> F["Transmission queries"]
 ```
 
-1. Capture the scene. Acquire RGB, available depth/confidence, camera calibration, and poses from a supported device. A clear-air reference distinguishes the scene's appearance from the medium in front of it.
-2. Estimate the medium. Infer optical attenuation from image changes and use reliable depth to locate background surfaces. Track confidence and observation age as smoke moves or capture conditions change.
-3. Build a spatial representation. Fuse observations into an approximate field of optical density. Preserve which regions are observed, inferred, or unknown so apps can choose how to display them.
-4. Render and interact. Integrate attenuation along viewing rays for compositing, raymarch the field for lighting effects, and expose spatial samples to the app's interaction model.
-5. Share the experience. Send timestamped fields and their coordinate transforms to another device for rendering and interaction from its own viewpoint.
+1. Find textured, approximately planar surfaces using camera imagery and reliable scene depth.
+2. Anchor small patches to the scene and resample the same physical footprint as the camera moves.
+3. Fit contrast loss against distance separately for each patch. Each patch has its own unknown intrinsic contrast, so the room can already be hazy when scanning starts.
+4. Combine fresh, agreeing patches into one effective extinction coefficient. Insufficient travel, occlusion, poor geometry, inconsistent texture, and incompatible camera settings prevent a usable estimate.
+5. Scale opted-in entities' original opacity with estimated transmission along their viewing paths.
 
-Live capture and recorded sessions feed the same pipeline, allowing developers to build and debug an effect against a repeatable recording.
+Capture is bounded to a small set of patches and runs at approximately five updates per second. It requires no neural model, cloud service, or third-party dependency.
 
 ## Modules
 
@@ -85,8 +97,8 @@ MurkKit uses a modular Swift package structure, with a shared data model and opt
 | Module | Responsibility |
 | --- | --- |
 | `MurkCore` | Volume and optical-path types, coordinate frames, timestamps, confidence, and transmittance queries |
-| `MurkCapture` | iPhone/iPad capture adapters, clear-air references, and session recording/replay |
-| `MurkEstimate` | Image-based attenuation estimation and observation quality checks |
+| `MurkCapture` | iPhone/iPad capture adapters and tracked natural-surface observations |
+| `MurkEstimate` | Contrast-distance attenuation estimation and observation quality checks |
 | `MurkFusion` | Approximate spatial reconstruction and temporal updates of the medium |
 | `MurkRender` | Metal volume rendering, haze-aware compositing, and adapters for Apple rendering frameworks |
 | `MurkInteract` | Density sampling, configurable virtual drag/buoyancy responses, and simulation hooks |
@@ -116,18 +128,19 @@ For cross-device AR, `MurkSync` carries the estimated field, confidence, timesta
 
 ## Capture model
 
-The estimator uses a simplified scattering model with a clear-air reference:
+For approximately uniform, steady haze, absolute texture contrast on a matte surface falls with camera-to-surface distance:
 
 ```text
-I = J · T + A · (1 − T)
-T = exp(−∫ σₑ(s) ds)
+C_p(d) = C_p(0) · exp(−σ · d)
+ln C_p(d) = a_p − σ · d
+T(d) = exp(−σ · d)
 ```
 
-`I` is the observed image, `J` the clear-air appearance, `A` an airlight estimate, and `T` transmittance along the viewing ray. The extinction coefficient `σₑ` describes optical attenuation. RGB provides evidence about the medium's appearance; depth provides scene geometry where reliable.
+Each patch `p` has a different unknown intercept `a_p`. Comparing that same patch at several distances estimates the common extinction coefficient `σ` without observing it in clear air. `C_p` is the standard deviation of linear-light luminance over a matched physical patch, and `d` is Euclidean distance in meters. The near/far principle is described by [Du et al.](https://amt.copernicus.org/articles/6/2121/2013/); that work supports the measurement principle, rather than validating this indoor iPhone implementation.
 
-A single view constrains attenuation along rays, so a 3D smoke field is inferred using multiple observations and modeling assumptions. Captured volumes expose confidence and unknown regions. The capture model assumes stable lighting, usable scene references, and light-to-moderate haze; rapidly changing or dense smoke may leave insufficient information.
+Scene depth supplies surface geometry, not direct measurements of smoke particles. Fixed physical patch sampling, exposure checks, texture matching, and agreement checks reduce ambiguity, but changing illumination, camera tone mapping, reflections, defocus, and moving objects can still resemble haze. Rapidly changing or patchy smoke violates the room model. A single room coefficient is not a reconstructed density volume.
 
-Optical density alone does not measure mass density, airflow, drag, or buoyancy. `MurkInteract` uses configurable simulation parameters, and optionally a separately estimated flow field, to produce virtual responses. Lighting and disturbances are rendered effects; they do not physically illuminate or move real smoke. Compositing accounts for haze already present in the camera image to avoid applying it twice.
+Optical extinction does not determine physical mass density, airflow, drag, or buoyancy. AR interactions and lighting effects use an optical estimate together with an app's rendering and simulation choices.
 
 ##Use
 mit license

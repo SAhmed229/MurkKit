@@ -4,35 +4,28 @@ import Combine
 import RealityKit
 import UIKit
 
-/// Fades opted-in entities using contrast loss on a stationary reference card.
-/// Retain this controller while in use and call `detach()` to release camera settings.
+/// Estimates approximately uniform room haze from natural textures at different distances.
+/// Retain this controller while scanning, and call `detach()` to restore camera settings.
 @MainActor
 public final class MurkHaze {
-    public enum CaptureError: LocalizedError {
-        case detached, captureInProgress, sceneDepthUnavailable, cameraUnavailable, invalidReference
+    public enum ScanError: LocalizedError {
+        case detached, sceneDepthUnavailable, cameraUnavailable
 
         public var errorDescription: String? {
             switch self {
             case .detached:
-                return "Attach a new MurkHaze controller before capturing a reference."
-            case .captureInProgress:
-                return "A clear-air reference capture is already in progress."
+                return "Attach a new MurkHaze controller before starting a scan."
             case .sceneDepthUnavailable:
                 return "Run a world-tracking AR session with sceneDepth on a LiDAR-equipped device."
             case .cameraUnavailable:
-                return "MurkKit could not lock the camera's exposure, white balance, and focus."
-            case .invalidReference:
-                return "Hold the phone still and center a matte black-left, white-right card in clear air. Check lighting and depth tracking."
+                return "MurkKit could not lock the camera's exposure and white balance."
             }
         }
     }
 
-    private struct Reference {
-        let sample: ContrastSample
-        let transform: simd_float4x4
-        let orientation: UIInterfaceOrientation
-        let viewport: CGSize
-    }
+    /// Confidence is insufficient until several surface patches support the same estimate.
+    public private(set) var estimate: HazeEstimate = .unavailable
+    public private(set) var isScanning = false
 
     @MainActor
     private final class TrackedEntity {
@@ -62,11 +55,10 @@ public final class MurkHaze {
     }
 
     private weak var view: ARView?
-    private let capture = CardCapture()
+    private let capture = RoomCapture()
+    private var estimator = RoomHazeEstimator()
     private var subscription: (any Cancellable)?
-    private var reference: Reference?
     private var entities: [ObjectIdentifier: TrackedEntity] = [:]
-    private var capturing = false
     private var detached = false
     private var lastTimestamp: TimeInterval = -.infinity
 
@@ -83,52 +75,34 @@ public final class MurkHaze {
         }
     }
 
-    /// Locks exposure, white balance, and focus, then captures a clear-air reference.
-    /// The card must have black on the left and white on the right at screen center.
-    /// Keep the camera and card fixed after capture. Recapture after moving either.
-    public func captureClearAirReference() async throws {
-        guard !detached, let view else { throw CaptureError.detached }
-        guard !capturing else { throw CaptureError.captureInProgress }
-        capturing = true
-        reference = nil
-        restoreEntities()
-        defer {
-            capturing = false
-            if reference == nil { capture.restoreCamera() }
-        }
-        try Task.checkCancellation()
+    /// Starts room scanning with the air as it is. No calibration target or clear-air pass.
+    /// Move slowly toward/away from textured, matte surfaces under steady lighting.
+    /// Exposure and white balance are held fixed; the host retains focus control.
+    public func startScanning() throws {
+        guard !detached, let view else { throw ScanError.detached }
+        guard !isScanning else { return }
+        reset()
         guard ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth),
-              let firstFrame = view.session.currentFrame,
-              firstFrame.sceneDepth != nil else {
-            throw CaptureError.sceneDepthUnavailable
+              view.session.currentFrame?.sceneDepth != nil else {
+            throw ScanError.sceneDepthUnavailable
         }
         do {
-            try capture.lockCamera()
+            try capture.start()
         } catch {
-            throw CaptureError.cameraUnavailable
+            capture.stop()
+            throw ScanError.cameraUnavailable
         }
+        isScanning = true
+    }
 
-        // Let locked camera settings reach a fresh frame; never reuse a pre-lock image.
-        for _ in 0..<40 {
-            try await Task.sleep(nanoseconds: 50_000_000)
-            guard !detached else { throw CaptureError.detached }
-            guard let frame = view.session.currentFrame,
-                  frame.timestamp > firstFrame.timestamp + 0.15,
-                  ProcessInfo.processInfo.systemUptime - frame.timestamp < 0.3,
-                  case .normal = frame.camera.trackingState,
-                  capture.cameraIsStable,
-                  let orientation = view.window?.windowScene?.interfaceOrientation,
-                  let sample = capture.sample(frame: frame, in: view),
-                  HazeEstimate(reference: sample, current: sample) != nil else { continue }
-
-            capture.saveLockedSettings()
-            guard capture.settingsAreUnchanged else { continue }
-            reference = Reference(sample: sample, transform: frame.camera.transform,
-                                  orientation: orientation, viewport: view.bounds.size)
-            lastTimestamp = -.infinity
-            return
-        }
-        throw CaptureError.invalidReference
+    /// Discards measurements when entering a new room or changing the lighting.
+    /// Keeps scanning and restores normal entity opacity until new evidence agrees.
+    public func reset() {
+        capture.reset()
+        estimator.reset()
+        estimate = .unavailable
+        lastTimestamp = -.infinity
+        restoreEntities()
     }
 
     /// Opts an entity and its descendants into fading, preserving its existing opacity.
@@ -157,10 +131,12 @@ public final class MurkHaze {
         detached = true
         subscription?.cancel()
         subscription = nil
-        reference = nil
+        isScanning = false
+        estimate = .unavailable
+        estimator.reset()
         restoreEntities()
         entities.removeAll()
-        capture.restoreCamera()
+        capture.stop()
     }
 
     deinit {
@@ -171,32 +147,38 @@ public final class MurkHaze {
         Task { @MainActor in
             subscription?.cancel()
             entities.forEach { $0.restore() }
-            capture.restoreCamera()
+            capture.stop()
         }
     }
 
     private func update() {
-        guard let reference, !capturing else { return }
+        guard isScanning else { return }
         guard let view, let frame = view.session.currentFrame,
               ProcessInfo.processInfo.systemUptime - frame.timestamp < 0.3,
-              case .normal = frame.camera.trackingState,
-              view.bounds.size == reference.viewport,
-              view.window?.windowScene?.interfaceOrientation == reference.orientation,
-              cameraIsNearReference(frame.camera.transform, reference.transform),
-              capture.settingsAreUnchanged else {
+              case .normal = frame.camera.trackingState else {
+            reset()
+            return
+        }
+        // Bound capture work to five observations/second, independently of rendering.
+        guard frame.timestamp - lastTimestamp >= 0.2 else { return }
+        lastTimestamp = frame.timestamp
+        guard let observations = capture.observations(frame: frame) else {
+            estimator.reset()
+            estimate = .unavailable
             restoreEntities()
             return
         }
-        // Two tiny image averages at 10 Hz; no volume reconstruction or full-frame copies.
-        guard frame.timestamp - lastTimestamp >= 0.1 else { return }
-        lastTimestamp = frame.timestamp
-        guard let sample = capture.sample(frame: frame, in: view),
-              let estimate = HazeEstimate(reference: reference.sample, current: sample) else {
+        let updated = estimator.add(observations, at: frame.timestamp)
+        // Unobserved or refocusing frames never hold a previous fade on screen.
+        estimate = observations.isEmpty ? .unavailable : updated
+        guard estimate.confidence == .usable else {
             restoreEntities()
             return
         }
 
         entities = entities.filter { $0.value.entity != nil }
+        let camera = frame.camera.transform.columns.3
+        let cameraOrigin = SIMD3<Float>(camera.x, camera.y, camera.z)
         for tracked in entities.values {
             guard let entity = tracked.entity else { continue }
             // Reparenting after track() must not apply the same haze twice.
@@ -206,9 +188,10 @@ public final class MurkHaze {
             }
             let position = entity.position(relativeTo: nil)
             let cameraPosition = frame.camera.transform.inverse * SIMD4<Float>(position, 1)
-            guard let projected = view.project(position),
-                  referenceRegion(in: view).contains(projected),
-                  let transmission = estimate.transmittance(atAxialDepth: Double(-cameraPosition.z)) else {
+            let distance = Double(simd_distance(cameraOrigin, position))
+            guard cameraPosition.z < 0,
+                  let projected = view.project(position), view.bounds.contains(projected),
+                  let transmission = estimate.transmittance(at: distance) else {
                 tracked.restore()
                 continue
             }
@@ -238,17 +221,5 @@ public final class MurkHaze {
         return false
     }
 
-    private func referenceRegion(in view: ARView) -> CGRect {
-        CGRect(x: view.bounds.width * 0.34, y: view.bounds.height * 0.44,
-               width: view.bounds.width * 0.32, height: view.bounds.height * 0.12)
-    }
-
-    private func cameraIsNearReference(_ current: simd_float4x4, _ baseline: simd_float4x4) -> Bool {
-        let delta = current.columns.3 - baseline.columns.3
-        let translation = simd_length(SIMD3<Float>(delta.x, delta.y, delta.z))
-        let rotation = simd_quatf(baseline).inverse * simd_quatf(current)
-        let angle = min(rotation.angle, 2 * .pi - rotation.angle)
-        return translation <= 0.015 && angle <= .pi / 180
-    }
 }
 #endif
